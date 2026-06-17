@@ -1,0 +1,185 @@
+#include <Arduino.h>
+#include <DHT.h>
+
+// ============================================
+// KONFIGURASI PIN DAN KONSTANTA
+// ============================================
+#define LED_PIN 2
+#define DHT_PIN 4
+#define DHT_TYPE DHT22
+
+// Inisialisasi DHT sensor sebagai global object
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// ============================================
+// GLOBAL VARIABLES
+// ============================================
+volatile uint32_t ledTaskCounter = 0;
+volatile uint32_t sensorTaskCounter = 0;
+volatile uint8_t ledState = 0;
+volatile float lastTemp = 0.0f;
+volatile float lastHumidity = 0.0f;
+
+// Flag untuk mengurangi serial output
+volatile boolean taskLEDInitialized = false;
+volatile boolean taskSensorInitialized = false;
+
+// ============================================
+// TASK 1: LED CONTROL (Core 0)
+// ============================================
+void taskLED(void *parameter)
+{
+  // Initialize pin
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  // Print initialization hanya sekali
+  if (!taskLEDInitialized)
+  {
+    Serial.println("[LED] Task initialized on Core 0");
+    taskLEDInitialized = true;
+  }
+
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(1000);
+  uint32_t printCounter = 0;
+
+  while (1)
+  {
+    // Toggle LED
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+    ledTaskCounter++;
+
+    // Print output setiap 5 kali toggle (5 detik) untuk kurangi serial load
+    if (++printCounter >= 5)
+    {
+      Serial.printf("[LED] Counter: %u | State: %d | Core: %d\n",
+                    ledTaskCounter, ledState, xPortGetCoreID());
+      printCounter = 0;
+    }
+
+    // Non-blocking delay dengan presisi timing
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+// ============================================
+// TASK 2: SENSOR READING (Core 1)
+// ============================================
+void taskSensor(void *parameter)
+{
+  // Initialize DHT sensor
+  dht.begin();
+  vTaskDelay(pdMS_TO_TICKS(2000)); // Wait untuk DHT stabilize
+
+  // Print initialization hanya sekali
+  if (!taskSensorInitialized)
+  {
+    Serial.println("[SENSOR] Task initialized on Core 1");
+    taskSensorInitialized = true;
+  }
+
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(2000);
+  uint32_t printCounter = 0;
+  uint8_t errorCount = 0;
+
+  while (1)
+  {
+    // Read sensor
+    float humidity = dht.readHumidity();
+    float temperature = dht.readTemperature();
+    sensorTaskCounter++;
+
+    // Validate data
+    if (!isnan(humidity) && !isnan(temperature))
+    {
+      // Simpan data ke volatile global
+      lastTemp = temperature;
+      lastHumidity = humidity;
+      errorCount = 0;
+
+      // Print output setiap 3 kali baca (6 detik) untuk kurangi serial load
+      if (++printCounter >= 3)
+      {
+        Serial.printf("[SENSOR] Temp: %.1f°C | Humidity: %.1f%% | Counter: %u | Core: %d\n",
+                      temperature, humidity, sensorTaskCounter, xPortGetCoreID());
+        printCounter = 0;
+      }
+    }
+    else
+    {
+      // Handle sensor error dengan mock data
+      errorCount++;
+      if (errorCount <= 1)
+      { // Print error hanya sekali
+        Serial.printf("[SENSOR] Read error - using mock data | Core: %d\n", xPortGetCoreID());
+      }
+
+      // Generate mock data (simulasi sensor yang masuk akal)
+      lastTemp = 25.0f + (rand() % 5);
+      lastHumidity = 60.0f + (rand() % 10);
+    }
+
+    // Non-blocking delay
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+// ============================================
+// SETUP FUNCTION
+// ============================================
+void setup()
+{
+  // Initialize Serial
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("\n========================================");
+  Serial.println("ESP32 FreeRTOS Multitasking - FIXED");
+  Serial.println("========================================\n");
+  Serial.println("Initializing tasks...\n");
+
+  // Create Task 1: LED Control pada Core 0
+  // Stack size: 2048 bytes (increased from 1024 to avoid overflow)
+  xTaskCreatePinnedToCore(
+      taskLED,    // Function
+      "LED_Task", // Task name
+      2048,       // Stack size (INCREASED - was 1024)
+      NULL,       // Parameter
+      2,          // Priority (higher priority on Core 0)
+      NULL,       // Task handle
+      0           // Core ID (0)
+  );
+
+  // Create Task 2: Sensor Reading pada Core 1
+  // Stack size: 4096 bytes (DHT library membutuhkan banyak stack)
+  xTaskCreatePinnedToCore(
+      taskSensor,    // Function
+      "Sensor_Task", // Task name
+      4096,          // Stack size (INCREASED - was 2048, DHT library is heavy)
+      NULL,          // Parameter
+      1,             // Priority
+      NULL,          // Task handle
+      1              // Core ID (1)
+  );
+
+  Serial.println("All tasks created and running!\n");
+  delay(1000);
+}
+
+// ============================================
+// LOOP FUNCTION
+// ============================================
+void loop()
+{
+  // Reduce monitoring frequency - hanya print setiap 15 detik
+  vTaskDelay(pdMS_TO_TICKS(15000));
+
+  Serial.printf("\n[MONITOR] System uptime: %u ms\n", millis());
+  Serial.printf("[MONITOR] LED Counter: %u | Sensor Counter: %u\n",
+                ledTaskCounter, sensorTaskCounter);
+  Serial.printf("[MONITOR] Last Temp: %.1f°C | Last Humidity: %.1f%%\n\n",
+                lastTemp, lastHumidity);
+}
